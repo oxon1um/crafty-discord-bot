@@ -318,7 +318,7 @@ def get_start_command(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
         async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
             try:
-async with asyncio.timeout(10):
+                async with asyncio.timeout(10):
                     response = await api.start_server(bot.server_id)
             except asyncio.TimeoutError:
                 await safe_followup_async(interaction, TIMEOUT_MESSAGE, ephemeral=True)
@@ -335,7 +335,7 @@ def get_stop_command(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
         async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
             try:
-async with asyncio.timeout(10):
+                async with asyncio.timeout(10):
                     response = await api.stop_server(bot.server_id)
             except asyncio.TimeoutError:
                 await safe_followup_async(interaction, TIMEOUT_MESSAGE, ephemeral=True)
@@ -352,7 +352,7 @@ def get_restart_command(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
         async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
             try:
-async with asyncio.timeout(10):
+                async with asyncio.timeout(10):
                     response = await api.restart_server(bot.server_id)
             except asyncio.TimeoutError:
                 await safe_followup_async(interaction, TIMEOUT_MESSAGE, ephemeral=True)
@@ -369,7 +369,7 @@ def get_kill_command(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
         async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
             try:
-async with asyncio.timeout(10):
+                async with asyncio.timeout(10):
                     response = await api.kill_server(bot.server_id)
             except asyncio.TimeoutError:
                 await safe_followup_async(interaction, TIMEOUT_MESSAGE, ephemeral=True)
@@ -386,7 +386,7 @@ def get_status_command(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
         async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
             try:
-async with asyncio.timeout(10):
+                async with asyncio.timeout(10):
                     response = await api.get_server_stats(bot.server_id)
             except asyncio.TimeoutError:
                 await safe_followup_async(interaction, TIMEOUT_MESSAGE, ephemeral=True)
