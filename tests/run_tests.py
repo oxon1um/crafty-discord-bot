@@ -14,12 +14,16 @@ def run_unit_tests():
     """Run unit tests for error handling"""
     print("🧪 Running unit tests for error handling...")
     
+    # Add src/utils to python path
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.path.abspath("src/utils") + os.pathsep + env.get("PYTHONPATH", "")
+    
     # Run pytest on the test file
     result = subprocess.run([
         sys.executable, "-m", "pytest", 
         "tests/test_error_handler.py", 
         "-v", "--tb=short"
-    ], capture_output=True, text=True)
+    ], capture_output=True, text=True, env=env)
     
     print(result.stdout)
     if result.stderr:
@@ -33,7 +37,7 @@ def run_live_tests():
     
     # Run the live test bot script
     result = subprocess.run([
-        sys.executable, "tests/live_test_bot.py"
+        sys.executable, "tests/deploy_test_bot.py"
     ], capture_output=True, text=True)
     
     print(result.stdout)
@@ -58,7 +62,7 @@ def check_deployment_readiness():
     print("✅ All required environment variables are set")
     
     # Check if bot files exist
-    bot_files = ['src/main.py', 'src/utils/bot_commands.py', 'discord_utils.py']
+    bot_files = ['src/main.py', 'src/utils/bot_commands.py', 'src/utils/discord_utils.py']
     for file_path in bot_files:
         if not os.path.exists(file_path):
             print(f"❌ Required file missing: {file_path}")

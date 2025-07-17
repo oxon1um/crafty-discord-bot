@@ -21,9 +21,9 @@ def can_respond(interaction: discord.Interaction) -> bool:
         interaction: The Discord interaction to check
         
     Returns:
-        bool: True if the interaction is not expired.
+        bool: True if the interaction is not expired and has not been responded to.
     """
-    return not interaction.is_expired()
+    return not interaction.is_expired() and not interaction.response.is_done()
 
 def _log_interaction_warning(message: str, interaction: discord.Interaction, error: Optional[Exception] = None, **kwargs):
     """Helper to log warnings about interactions."""

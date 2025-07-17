@@ -118,8 +118,6 @@ class TestBotDeployment:
             # Replace the error handler
             self.bot.tree.error = monitoring_error_handler
             
-            # Add command monitoring
-            @self.bot.tree.before_invoke
             async def before_command(interaction: discord.Interaction):
                 """Monitor command invocation"""
                 command_name = interaction.command.name if interaction.command else 'unknown'
@@ -138,7 +136,6 @@ class TestBotDeployment:
                 
                 logger.info(f"📝 Command invoked: /{command_name} by {interaction.user.name} ({interaction.user.id})")
             
-            @self.bot.tree.after_invoke
             async def after_command(interaction: discord.Interaction):
                 """Monitor command completion"""
                 command_name = interaction.command.name if interaction.command else 'unknown'
@@ -149,6 +146,10 @@ class TestBotDeployment:
                     self.deployment_stats['command_statistics'][command_name]['successful'] += 1
                 
                 logger.info(f"✅ Command completed: /{command_name}")
+
+            # Add command monitoring
+            self.bot.before_invoke(before_command)
+            self.bot.after_invoke(after_command)
             
             # Add ready event monitoring
             @self.bot.event

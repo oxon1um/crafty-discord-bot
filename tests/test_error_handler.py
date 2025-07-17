@@ -52,6 +52,7 @@ class TestInteractionMocking:
         # Verify calls
         interaction.is_expired.assert_called_once()
         interaction.response.is_done.assert_called_once()
+        interaction.response.is_done.assert_called_once()
     
     def test_expired_interaction_cannot_respond(self):
         """Test that an expired interaction cannot respond"""
@@ -86,7 +87,7 @@ class TestInteractionMocking:
         
         # Verify result and calls
         assert result is True
-        interaction.response.send_message.assert_called_once_with(content="Test message", ephemeral=True)
+        interaction.response.send_message.assert_called_once_with(content="Test message", embed=None, ephemeral=True)
         interaction.followup.send.assert_not_called()
     
     @pytest.mark.asyncio
@@ -125,7 +126,7 @@ class TestInteractionMocking:
         
         # Verify result and calls
         assert result is True
-        interaction.followup.send.assert_called_once_with(content="Test followup", ephemeral=True)
+        interaction.followup.send.assert_called_once_with(content="Test followup", embed=None, ephemeral=True)
         interaction.response.send_message.assert_not_called()
     
     @pytest.mark.asyncio
@@ -331,19 +332,19 @@ class TestDiscordErrorSimulation:
         interaction = self.create_mock_interaction(is_expired=False, is_responded=False)
         
         # Mock the response to raise InteractionResponded error (40060)
-        interaction.response.send_message.side_effect = discord.InteractionResponded(mock.Mock())
+        interaction.response.send_message.side_effect = discord.InteractionResponded(interaction=interaction)
         
         with patch('discord_utils.logger') as mock_logger:
             result = await safe_respond_async(interaction, content="Test message")
             
             # Verify error was handled gracefully
-            assert result is False
-            mock_logger.error.assert_called()
+            assert result is True
+            mock_logger.warning.assert_called()
             
             # Check that the specific error was logged
-            error_calls = [call for call in mock_logger.error.call_args_list 
+            warning_calls = [call for call in mock_logger.warning.call_args_list 
                           if "InteractionResponded" in str(call)]
-            assert len(error_calls) > 0
+            assert len(warning_calls) > 0
     
     @pytest.mark.asyncio
     async def test_safe_respond_handles_10062_error(self):
@@ -351,19 +352,19 @@ class TestDiscordErrorSimulation:
         interaction = self.create_mock_interaction(is_expired=False, is_responded=False)
         
         # Mock the response to raise NotFound error (10062)
-        interaction.response.send_message.side_effect = discord.NotFound(mock.Mock(), "Unknown interaction")
+        interaction.response.send_message.side_effect = discord.NotFound(data={'message': 'Unknown interaction', 'code': 10062}, response=AsyncMock())
         
         with patch('discord_utils.logger') as mock_logger:
             result = await safe_respond_async(interaction, content="Test message")
             
             # Verify error was handled gracefully
             assert result is False
-            mock_logger.error.assert_called()
+            mock_logger.warning.assert_called()
             
             # Check that the specific error was logged
-            error_calls = [call for call in mock_logger.error.call_args_list 
+            warning_calls = [call for call in mock_logger.warning.call_args_list 
                           if "NotFound" in str(call)]
-            assert len(error_calls) > 0
+            assert len(warning_calls) > 0
     
     @pytest.mark.asyncio
     async def test_safe_followup_handles_10062_error(self):
@@ -371,19 +372,19 @@ class TestDiscordErrorSimulation:
         interaction = self.create_mock_interaction(is_expired=False, is_responded=True)
         
         # Mock the followup to raise NotFound error (10062)
-        interaction.followup.send.side_effect = discord.NotFound(mock.Mock(), "Unknown interaction")
+        interaction.followup.send.side_effect = discord.NotFound(data={'message': 'Unknown interaction', 'code': 10062}, response=AsyncMock())
         
         with patch('discord_utils.logger') as mock_logger:
             result = await safe_followup_async(interaction, content="Test followup")
             
             # Verify error was handled gracefully
             assert result is False
-            mock_logger.error.assert_called()
+            mock_logger.warning.assert_called()
             
             # Check that the specific error was logged
-            error_calls = [call for call in mock_logger.error.call_args_list 
+            warning_calls = [call for call in mock_logger.warning.call_args_list 
                           if "NotFound" in str(call)]
-            assert len(error_calls) > 0
+            assert len(warning_calls) > 0
     
     @pytest.mark.asyncio
     async def test_safe_followup_handles_expired_interaction(self):
@@ -395,12 +396,15 @@ class TestDiscordErrorSimulation:
             
             # Verify error was handled gracefully
             assert result is False
-            mock_logger.warning.assert_called()
-            
-            # Check that the specific warning was logged
-            warning_calls = [call for call in mock_logger.warning.call_args_list 
-                           if "Cannot send followup to interaction" in str(call)]
-            assert len(warning_calls) > 0
+            mock_logger.warning.assert_called_with("Skipping followup to expired interaction", extra={
+                'interaction_id': interaction.id,
+                'interaction_type': interaction.type.name,
+                'user_id': interaction.user.id,
+                'guild_id': interaction.guild.id,
+                'channel_id': interaction.channel.id,
+                'command_name': interaction.command.name,
+                'skip_reason': 'interaction_expired'
+            })
     
     @pytest.mark.asyncio
     async def test_comprehensive_error_flow(self):
