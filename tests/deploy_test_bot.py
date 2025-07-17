@@ -52,7 +52,7 @@ class TestBotDeployment:
         self.error_log = []
         self.monitoring_active = False
     
-    async def setup_test_bot(self):
+    def setup_test_bot(self):
         """Setup the test bot with enhanced error monitoring"""
         logger.info("Setting up test bot with error monitoring...")
         
@@ -230,7 +230,7 @@ class TestBotDeployment:
         """Run the deployment test"""
         logger.info("🚀 Starting deployment test...")
         
-        if not await self.setup_test_bot():
+        if not self.setup_test_bot():
             logger.error("❌ Failed to setup test bot")
             return False
         

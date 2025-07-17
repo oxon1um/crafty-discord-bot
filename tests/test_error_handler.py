@@ -271,7 +271,6 @@ class TestErrorHandlerBehavior:
         
         # Mock safe_respond_async to raise an exception
         with patch('utils.bot_commands.safe_respond_async', side_effect=discord.HTTPException(mock.Mock(), "Secondary error")) as mock_respond, \
-             patch('utils.bot_commands.safe_followup_async') as mock_followup, \
              patch('utils.bot_commands.can_respond', return_value=True), \
              patch('utils.bot_commands.logger') as mock_logger:
             

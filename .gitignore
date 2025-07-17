@@ -10,3 +10,4 @@ venv/
 # Ignore IDE/editor specific files
 docs/
 venv/
+tests/

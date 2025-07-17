@@ -21,25 +21,35 @@ def can_respond(interaction: discord.Interaction) -> bool:
         interaction: The Discord interaction to check
         
     Returns:
-        bool: True if the interaction can still receive responses, False otherwise
+        bool: True if the interaction is not expired.
     """
-    # Check if interaction is expired (generally 3 seconds for initial response, 15 minutes for followups)
-    if interaction.is_expired():
-        return False
-    
-    # Check if we already responded
-    if interaction.response.is_done():
-        # If we already responded, we can only send followup messages
-        return True
-    
-    # If we haven't responded yet, we can respond
-    return True
+    return not interaction.is_expired()
+
+def _log_interaction_warning(message: str, interaction: discord.Interaction, error: Optional[Exception] = None, **kwargs):
+    """Helper to log warnings about interactions."""
+    extra = {
+        "interaction_id": interaction.id,
+        "interaction_type": interaction.type.name if interaction.type else "unknown",
+        "user_id": interaction.user.id if interaction.user else None,
+        "guild_id": interaction.guild.id if interaction.guild else None,
+        "channel_id": interaction.channel.id if interaction.channel else None,
+        "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
+        **kwargs
+    }
+    if error:
+        extra['error_type'] = type(error).__name__
+        extra['error_message'] = str(error)
+        if isinstance(error, discord.HTTPException):
+            extra['error_code'] = getattr(error, 'code', None)
+
+    logger.warning(message, extra=extra)
 
 
 async def safe_respond_async(interaction: discord.Interaction, content: Optional[str] = None, 
                             embed: Optional[discord.Embed] = None, ephemeral: bool = False) -> bool:
     """
     Safely send a response to a Discord interaction without raising exceptions (async version).
+    It will attempt an initial response, and if that fails, it will try a followup.
     
     Args:
         interaction: The Discord interaction to respond to
@@ -51,82 +61,37 @@ async def safe_respond_async(interaction: discord.Interaction, content: Optional
         bool: True if the response was sent successfully, False otherwise
     """
     if not can_respond(interaction):
-        logger.warning(
-            "Skipping response to expired interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "interaction_expired"
-            }
-        )
+        _log_interaction_warning("Skipping response to expired interaction", interaction, skip_reason="interaction_expired")
         return False
     
     try:
         if not interaction.response.is_done():
-            # Send initial response
             await interaction.response.send_message(
                 content=content, 
                 embed=embed, 
                 ephemeral=ephemeral
             )
-            return True
         else:
-            # Send followup response
             await interaction.followup.send(
                 content=content, 
                 embed=embed, 
                 ephemeral=ephemeral
             )
+        return True
+    except discord.InteractionResponded as e:
+        _log_interaction_warning("Attempted to respond to already responded interaction", interaction, e, skip_reason="already_responded")
+        # Try a followup as a fallback
+        try:
+            await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
             return True
-    except discord.InteractionResponded:
-        logger.warning(
-            "Attempted to respond to already responded interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "already_responded"
-            }
-        )
-        return False
+        except Exception as followup_e:
+            _log_interaction_warning("Followup failed after InteractionResponded", interaction, followup_e, skip_reason="followup_failed")
+            return False
     except discord.HTTPException as e:
-        logger.warning(
-            "HTTP error when responding to interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "http_error",
-                "error_code": e.code if hasattr(e, 'code') else None,
-                "error_text": str(e)
-            }
-        )
+        _log_interaction_warning("HTTP error when responding to interaction", interaction, e, skip_reason="http_error")
         return False
     except Exception as e:
-        logger.warning(
-            "Unexpected error when responding to interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "unexpected_error",
-                "error_type": type(e).__name__,
-                "error_message": str(e)
-            }
-        )
+        _log_interaction_warning("Unexpected error when responding to interaction", interaction, e, skip_reason="unexpected_error")
         return False
 
 async def safe_followup_async(interaction: discord.Interaction, content: Optional[str] = None, 
@@ -144,18 +109,7 @@ async def safe_followup_async(interaction: discord.Interaction, content: Optiona
         bool: True if the followup was sent successfully, False otherwise
     """
     if interaction.is_expired():
-        logger.warning(
-            "Skipping followup to expired interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "interaction_expired"
-            }
-        )
+        _log_interaction_warning("Skipping followup to expired interaction", interaction, skip_reason="interaction_expired")
         return False
     
     try:
@@ -166,34 +120,8 @@ async def safe_followup_async(interaction: discord.Interaction, content: Optiona
         )
         return True
     except discord.HTTPException as e:
-        logger.warning(
-            "HTTP error when sending followup to interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "http_error",
-                "error_code": e.code if hasattr(e, 'code') else None,
-                "error_text": str(e)
-            }
-        )
+        _log_interaction_warning("HTTP error when sending followup to interaction", interaction, e, skip_reason="http_error")
         return False
     except Exception as e:
-        logger.warning(
-            "Unexpected error when sending followup to interaction",
-            extra={
-                "interaction_id": interaction.id,
-                "interaction_type": interaction.type.name if interaction.type else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None,
-                "command_name": getattr(interaction.command, 'name', None) if hasattr(interaction, 'command') else None,
-                "skip_reason": "unexpected_error",
-                "error_type": type(e).__name__,
-                "error_message": str(e)
-            }
-        )
+        _log_interaction_warning("Unexpected error when sending followup to interaction", interaction, e, skip_reason="unexpected_error")
         return False
