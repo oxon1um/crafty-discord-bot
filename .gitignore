@@ -1,5 +1,6 @@
 # Ignore environment variable files
 .env
+.gitignore
 # Ignore Python bytecode files
 __pycache__/
 *.pyc
