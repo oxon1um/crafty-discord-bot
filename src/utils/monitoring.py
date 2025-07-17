@@ -7,7 +7,7 @@ and structured logging utilities for better observability.
 
 import os
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 from functools import wraps
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def initialize_sentry() -> bool:
             dsn=sentry_dsn,
             integrations=[
                 sentry_logging,
-                AsyncioIntegration(auto_enabling_integrations=False)
+                AsyncioIntegration()
             ],
             traces_sample_rate=float(os.getenv('SENTRY_TRACES_SAMPLE_RATE', '0.1')),
             environment=os.getenv('ENVIRONMENT', 'development'),
@@ -75,7 +75,7 @@ def initialize_sentry() -> bool:
         _sentry_available = False
         return False
 
-def _before_send_filter(event: Dict[str, Any], hint: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _before_send_filter(event, hint):
     """
     Filter Sentry events before sending to avoid noise.
     
@@ -133,7 +133,7 @@ def capture_exception(error: Exception, context: Optional[Dict[str, Any]] = None
     except Exception as e:
         logger.error(f"Failed to capture exception in Sentry: {e}")
 
-def capture_message(message: str, level: str = "info", context: Optional[Dict[str, Any]] = None) -> None:
+def capture_message(message: str, level: Literal["fatal", "critical", "error", "warning", "info", "debug"] = "info", context: Optional[Dict[str, Any]] = None) -> None:
     """
     Capture a message for monitoring.
     

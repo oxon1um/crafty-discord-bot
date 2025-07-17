@@ -63,35 +63,53 @@ async def safe_respond_async(interaction: discord.Interaction, content: Optional
     if not can_respond(interaction):
         _log_interaction_warning("Skipping response to expired interaction", interaction, skip_reason="interaction_expired")
         return False
-    
+
+    return await _send_response(interaction, content, embed, ephemeral)
+
+def build_kwargs(content: Optional[str], embed: Optional[discord.Embed], ephemeral: bool) -> Dict[str, Any]:
+    """
+    Build the kwargs dictionary for send_message and followup.send methods.
+    """
+    kwargs: Dict[str, Any] = {"ephemeral": ephemeral}
+    if content is not None:
+        kwargs["content"] = content
+    if embed is not None:
+        kwargs["embed"] = embed
+    return kwargs
+
+async def _send_response(interaction: discord.Interaction, content: Optional[str], 
+                         embed: Optional[discord.Embed], ephemeral: bool) -> bool:
+    """
+    Internal function to handle sending responses.
+    """
     try:
+        kwargs = build_kwargs(content, embed, ephemeral)
         if not interaction.response.is_done():
-            await interaction.response.send_message(
-                content=content, 
-                embed=embed, 
-                ephemeral=ephemeral
-            )
+            await interaction.response.send_message(**kwargs)
         else:
-            await interaction.followup.send(
-                content=content, 
-                embed=embed, 
-                ephemeral=ephemeral
-            )
+            await interaction.followup.send(**kwargs)
         return True
     except discord.InteractionResponded as e:
         _log_interaction_warning("Attempted to respond to already responded interaction", interaction, e, skip_reason="already_responded")
-        # Try a followup as a fallback
-        try:
-            await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
-            return True
-        except Exception as followup_e:
-            _log_interaction_warning("Followup failed after InteractionResponded", interaction, followup_e, skip_reason="followup_failed")
-            return False
+        return await _try_followup(interaction, content, embed, ephemeral)
     except discord.HTTPException as e:
         _log_interaction_warning("HTTP error when responding to interaction", interaction, e, skip_reason="http_error")
         return False
     except Exception as e:
         _log_interaction_warning("Unexpected error when responding to interaction", interaction, e, skip_reason="unexpected_error")
+        return False
+
+async def _try_followup(interaction: discord.Interaction, content: Optional[str], 
+                        embed: Optional[discord.Embed], ephemeral: bool) -> bool:
+    """
+    Internal function to handle followup responses.
+    """
+    try:
+        kwargs = build_kwargs(content, embed, ephemeral)
+        await interaction.followup.send(**kwargs)
+        return True
+    except Exception as followup_e:
+        _log_interaction_warning("Followup failed after InteractionResponded", interaction, followup_e, skip_reason="followup_failed")
         return False
 
 async def safe_followup_async(interaction: discord.Interaction, content: Optional[str] = None, 
@@ -113,11 +131,8 @@ async def safe_followup_async(interaction: discord.Interaction, content: Optiona
         return False
     
     try:
-        await interaction.followup.send(
-            content=content, 
-            embed=embed, 
-            ephemeral=ephemeral
-        )
+        kwargs = build_kwargs(content, embed, ephemeral)
+        await interaction.followup.send(**kwargs)
         return True
     except discord.HTTPException as e:
         _log_interaction_warning("HTTP error when sending followup to interaction", interaction, e, skip_reason="http_error")

@@ -113,15 +113,11 @@ class CraftyAPI:
             print(f"Starting request to {params.url}")
             print(f"Headers: {params.headers}")
 
-        async def on_request_chunk_received(session, trace_config_ctx, chunk):
-            print(f"Received chunk: {chunk}")
-
         async def on_request_end(session, trace_config_ctx, params):
             print(f"Request to {params.url} ended with status {params.response.status}")
 
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(on_request_start)
-        trace_config.on_request_chunk_received.append(on_request_chunk_received)
         trace_config.on_request_end.append(on_request_end)
 
         connector = aiohttp.TCPConnector(limit=10, ssl=False)
@@ -341,9 +337,9 @@ class CraftyAPI:
             response = await self._make_request("GET", f"/servers/{server_id}/stats")
             
             if response.success and response.data and isinstance(response.data, dict):
+                stats_data: Dict[str, Any] = response.data
                 try:
                     # Parse the server stats from the API response
-                    stats_data: Dict[str, Any] = response.data
                     logger.debug(f"Successfully retrieved stats data for server {server_id}")
                     logger.debug(f"Raw stats data keys: {list(stats_data.keys())}")
                     

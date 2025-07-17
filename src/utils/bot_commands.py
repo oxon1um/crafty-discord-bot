@@ -8,7 +8,7 @@ from discord.ext import commands
 from discord import app_commands
 from utils.crafty_api import CraftyAPI, ServerStats, ApiResponse
 from utils.monitoring import capture_exception, add_breadcrumb
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Callable
 
 from typing_extensions import Annotated  # Use typing_extensions for Python 3.8+ compatibility
 
@@ -246,69 +246,95 @@ async def on_ready_handler(bot):
     )
     await bot.change_presence(activity=activity)
 
+def handle_missing_permissions(interaction: discord.Interaction) -> str:
+    return "❌ You don't have permission to use this command."
+
+def handle_command_on_cooldown(original_error: app_commands.CommandOnCooldown) -> str:
+    return f"❌ Command is on cooldown. Try again in {original_error.retry_after:.2f} seconds."
+
+def handle_transformer_error() -> str:
+    return "❌ Invalid argument provided. Please check your input."
+
+def handle_value_error(original_error: ValueError) -> str:
+    return f"❌ Invalid value: {str(original_error)}"
+
+def log_error_breadcrumb(interaction: discord.Interaction, original_error: Exception) -> None:
+    """Log a breadcrumb for the error with relevant context."""
+    add_breadcrumb(
+        message="Application command error occurred",
+        category="discord_command",
+        level="error",
+        data={
+            "command": interaction.command.name if interaction.command else "unknown",
+            "error_type": type(original_error).__name__,
+            "user_id": interaction.user.id if interaction.user else None,
+            "guild_id": interaction.guild.id if interaction.guild else None
+        }
+    )
+
+async def send_error_response(interaction: discord.Interaction, error_message: str) -> None:
+    """Send an error response to the user, handling both response and followup cases."""
+    if can_respond(interaction):
+        await safe_respond_async(interaction, error_message, ephemeral=True)
+    else:
+        await safe_followup_async(interaction, error_message, ephemeral=True)
+
+async def handle_secondary_error(interaction: discord.Interaction, secondary_error: Exception) -> None:
+    """Handle errors that occur within the error handler itself."""
+    logger.error(f"Secondary error in error handler: {secondary_error}")
+    logger.error(f"Error handler traceback:\n{traceback.format_exc()}")
+    
+    try:
+        generic_message = "❌ An error occurred while processing your command."
+        await send_error_response(interaction, generic_message)
+    except Exception:
+        logger.error(f"Failed to send any error response for interaction {interaction.id}")
+
+def handle_unexpected_error(interaction: discord.Interaction, original_error: Exception) -> str:
+    logger.error(f"Unexpected error in application command: {original_error}")
+    capture_exception(original_error, {
+        "component": "discord_command",
+        "command": interaction.command.name if interaction.command else "unknown",
+        "user_id": interaction.user.id if interaction.user else None,
+        "guild_id": interaction.guild.id if interaction.guild else None,
+        "channel_id": interaction.channel.id if interaction.channel else None
+    })
+    error_message = "❌ " + str(original_error)
+    if len(error_message) > 2000:
+        error_message = "❌ An unexpected error occurred. Please try again later."
+    return error_message
+
 async def on_app_command_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     try:
         original_error = error
         if isinstance(error, app_commands.CommandInvokeError):
             original_error = error.original
+
+        log_error_breadcrumb(interaction, original_error)
+
+        error_handlers: Dict[type, Callable[..., str]] = {
+            app_commands.MissingPermissions: handle_missing_permissions,
+            app_commands.CommandOnCooldown: handle_command_on_cooldown,
+            app_commands.TransformerError: handle_transformer_error,
+            ValueError: handle_value_error
+        }
+
+        handler = error_handlers.get(type(original_error), handle_unexpected_error)
         
-        # Add breadcrumb for error context
-        add_breadcrumb(
-            message="Application command error occurred",
-            category="discord_command",
-            level="error",
-            data={
-                "command": interaction.command.name if interaction.command else "unknown",
-                "error_type": type(original_error).__name__,
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None
-            }
-        )
-        
-        # Handle specific error types
-        if isinstance(original_error, app_commands.MissingPermissions):
-            error_message = "❌ You don't have permission to use this command."
-        elif isinstance(original_error, app_commands.CommandOnCooldown):
-            error_message = f"❌ Command is on cooldown. Try again in {original_error.retry_after:.2f} seconds."
-        elif isinstance(original_error, app_commands.TransformerError):
-            error_message = "❌ Invalid argument provided. Please check your input."
-        elif isinstance(original_error, ValueError):
-            error_message = f"❌ Invalid value: {str(original_error)}"
+        # Call the appropriate handler with the correct arguments
+        if handler is handle_missing_permissions:
+            error_message = handler(interaction)
+        elif handler is handle_transformer_error:
+            error_message = handler()
+        elif handler is handle_unexpected_error:
+            error_message = handler(interaction, original_error)
         else:
-            logger.error(f"Unexpected error in application command: {original_error}")
-            # Capture unexpected errors for monitoring
-            capture_exception(original_error, {
-                "component": "discord_command",
-                "command": interaction.command.name if interaction.command else "unknown",
-                "user_id": interaction.user.id if interaction.user else None,
-                "guild_id": interaction.guild.id if interaction.guild else None,
-                "channel_id": interaction.channel.id if interaction.channel else None
-            })
-            error_message = "❌ " + str(original_error)
-            if len(error_message) > 2000:
-                error_message = "❌ An unexpected error occurred. Please try again later."
-        
-        # Use helper functions to safely respond
-        if can_respond(interaction):
-            await safe_respond_async(interaction, error_message, ephemeral=True)
-        else:
-            await safe_followup_async(interaction, error_message, ephemeral=True)
-    
+            error_message = handler(original_error)
+
+        await send_error_response(interaction, error_message)
+
     except Exception as secondary_error:
-        # Prevent secondary failures with broad try/except
-        logger.error(f"Secondary error in error handler: {secondary_error}")
-        logger.error(f"Error handler traceback:\n{traceback.format_exc()}")
-        
-        # Last resort: attempt to send a generic error message
-        try:
-            generic_message = "❌ An error occurred while processing your command."
-            if can_respond(interaction):
-                await safe_respond_async(interaction, generic_message, ephemeral=True)
-            else:
-                await safe_followup_async(interaction, generic_message, ephemeral=True)
-        except Exception:
-            # If even the generic message fails, just log it
-            logger.error(f"Failed to send any error response for interaction {interaction.id}")
+        await handle_secondary_error(interaction, secondary_error)
 
 def get_start_command(bot):
     @app_commands.command(name="start", description="Start the Crafty Controller server")
