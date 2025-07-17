@@ -21,7 +21,7 @@ A Discord bot for managing Minecraft servers through Crafty Controller using Dis
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/oxon1um/crafty-discord-bot
 cd crafty-discord-bot
 ```
 
@@ -98,10 +98,10 @@ Show available commands and usage information
 ## Usage Examples
 
 ```
-/start f1bf6997-9f43-4f36-b06f-9d3daefc7a8a
-/status f1bf6997-9f43-4f36-b06f-9d3daefc7a8a
-/restart f1bf6997-9f43-4f36-b06f-9d3daefc7a8a
-/stop f1bf6997-9f43-4f36-b06f-9d3daefc7a8a
+/start <server_id>
+/status <server_id>
+/restart <server_id>
+/stop <server_id>
 ```
 
 ## Migration Notes
@@ -141,30 +141,6 @@ If you already have this bot invited to your Discord server **before** the slash
 python src/main.py
 ```
 
-### Testing
-
-#### Quick Testing
-```bash
-# Run all CI tests
-python run_tests.py
-
-# Run specific test types
-python -m pytest tests/test_crafty_api.py -v
-python -m pytest tests/test_crafty_api.py::TestCraftyAPIWithAioresponses -v
-```
-
-#### Manual Testing
-```bash
-# Follow the comprehensive manual testing guide
-# See MANUAL_TESTING.md for detailed instructions
-```
-
-### Type Checking
-
-```bash
-mypy src/utils/crafty_api.py --ignore-missing-imports
-```
-
 ## Configuration
 
 The bot uses environment variables for configuration. Create a `.env` file in the root directory:
@@ -199,7 +175,3 @@ The bot logs important events including:
 3. Make your changes
 4. Add tests if applicable
 5. Submit a pull request
-
-## License
-
-[Add your license information here]
