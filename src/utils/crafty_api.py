@@ -19,6 +19,25 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def redact_authorization(headers: Dict[str, str]) -> Dict[str, str]:
+    """Redact the Authorization header in a copy of the headers.
+    
+    Args:
+        headers: The original headers dictionary
+        
+    Returns:
+        A copy of the headers with the Authorization value redacted
+    """
+    redacted_headers = headers.copy()
+    # Case-insensitive search for Authorization header
+    for key in redacted_headers:
+        if key.lower() == 'authorization':
+            redacted_headers[key] = 'REDACTED'
+            break
+    return redacted_headers
+
+
 # Type aliases for better readability
 UUIDStr = NewType("UUIDStr", str)
 ServerID: TypeAlias = Annotated[str, "Server ID must be a UUID-like string"]
@@ -111,7 +130,8 @@ class CraftyAPI:
         """Async context manager entry"""
         async def on_request_start(session, trace_config_ctx, params):
             print(f"Starting request to {params.url}")
-            print(f"Headers: {params.headers}")
+            redacted_headers = redact_authorization(params.headers)
+            print(f"Headers: {redacted_headers}")
 
         async def on_request_end(session, trace_config_ctx, params):
             print(f"Request to {params.url} ended with status {params.response.status}")
@@ -123,7 +143,11 @@ class CraftyAPI:
         connector = aiohttp.TCPConnector(limit=10, ssl=False)
         self.session = aiohttp.ClientSession(
             connector=connector,
-            timeout=aiohttp.ClientTimeout(sock_connect=5, sock_read=25),
+            timeout=aiohttp.ClientTimeout(
+                total=30,  # Total timeout for the entire request
+                sock_connect=5,  # Timeout for socket connection
+                sock_read=20    # Timeout for reading data from socket
+            ),
             trace_configs=[trace_config]
         )
         return self
@@ -152,6 +176,8 @@ class CraftyAPI:
         if not self.session:
             raise CraftyAPIConnectionError("API session not initialized")
         
+        session = self.session  # Type narrowing for mypy/pylance
+        
         headers = {
             "Authorization": f"Bearer {self.token}",  # Standard format
             "Content-Type": "application/json"
@@ -159,40 +185,46 @@ class CraftyAPI:
         url = f"{self.base_url}/api/v2{endpoint}"
         
         logger.debug(f"Making {method} request to {url}")
-        logger.debug(f"Headers: {headers}")
-        if self.session.connector:
-            logger.debug(f"Connector connections: {self.session.connector._conns}")
+        redacted_headers = redact_authorization(headers)
+        logger.debug(f"Headers: {redacted_headers}")
+        if session.connector:
+            logger.debug(f"Connector connections: {session.connector._conns}")
         
         try:
             start_time = asyncio.get_event_loop().time()
-            async with self.session.request(method, url, headers=headers, **kwargs) as response:
-                end_time = asyncio.get_event_loop().time()
-                latency = end_time - start_time
-                logger.info(f"Request to {url} took {latency:.2f} seconds.")
-                try:
-                    response_data = await response.json()
-                except aiohttp.ContentTypeError:
-                    response_data = {}
-                
-                if response.status == 200 and response_data.get('status') == 'ok':
-                    return ApiResponse(
-                        success=True,
-                        message="Request successful",
-                        data=response_data.get('data')
-                    )
-                else:
-                    error_message = response_data.get('error', f"HTTP {response.status}: {response.reason}")
-                    raise CraftyAPIResponseError(
-                        f"API request failed: {error_message}",
-                        response.status
-                    )
+            # Add an additional timeout layer for better control
+            async def make_request():
+                async with session.request(method, url, headers=headers, **kwargs) as response:
+                    end_time = asyncio.get_event_loop().time()
+                    latency = end_time - start_time
+                    logger.info(f"Request to {url} took {latency:.2f} seconds.")
+                    try:
+                        response_data = await response.json()
+                    except aiohttp.ContentTypeError:
+                        response_data = {}
                     
+                    if response.status == 200 and response_data.get('status') == 'ok':
+                        return ApiResponse(
+                            success=True,
+                            message="Request successful",
+                            data=response_data.get('data')
+                        )
+                    else:
+                        error_message = response_data.get('error', f"HTTP {response.status}: {response.reason}")
+                        raise CraftyAPIResponseError(
+                            f"API request failed: {error_message}",
+                            response.status
+                        )
+            
+            # Use asyncio.wait_for for compatibility with Python 3.10
+            return await asyncio.wait_for(make_request(), timeout=35)
+                        
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
+            logger.error(f"Request timeout: {e}")
+            raise CraftyAPITimeoutError(f"Request timeout: {str(e)}")
         except aiohttp.ClientError as e:
             logger.error(f"Connection error: {e}")
             raise CraftyAPIConnectionError(f"Connection error: {str(e)}")
-        except asyncio.TimeoutError:
-            logger.error("Request timeout")
-            raise CraftyAPITimeoutError("Request timeout")
         except CraftyAPIError:
             # Re-raise our custom exceptions
             raise
@@ -436,12 +468,23 @@ class CraftyAPI:
             CraftyAPIError: If the request fails
         """
         try:
+            # Validate command input
+            if not command or not command.strip():
+                return ApiResponse(
+                    success=False,
+                    message="Command cannot be empty",
+                    error_code=400
+                )
+            
+            # Override the default headers for this specific endpoint
+            custom_headers = {'Content-Type': 'text/plain'}
+            
             # According to the API docs, the request body should be just the command text
             response = await self._make_request(
                 "POST", 
                 f"/servers/{server_id}/stdin", 
                 data=command.encode('utf-8'),
-                headers={'Content-Type': 'text/plain'}
+                headers=custom_headers
             )
             response.message = f"Command '{command}' sent to server {server_id} successfully"
             return response
@@ -486,5 +529,6 @@ __all__ = [
     'CraftyAPIError',
     'CraftyAPIConnectionError',
     'CraftyAPITimeoutError',
-    'CraftyAPIResponseError'
+    'CraftyAPIResponseError',
+    'redact_authorization'
 ]
