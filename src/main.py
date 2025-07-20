@@ -6,6 +6,7 @@ from typing import List, NoReturn
 from dotenv import load_dotenv
 from utils.bot_commands import create_bot
 from utils.monitoring import initialize_sentry, capture_exception, get_monitoring_status
+from utils.config_validation import perform_startup_health_check
 
 # Load environment variables
 load_dotenv()
@@ -19,24 +20,15 @@ logging.basicConfig(
 async def main() -> None:
     """Main function to run the bot"""
     # Initialize monitoring system (optional)
-    sentry_enabled = initialize_sentry()
+    initialize_sentry()
     monitoring_status = get_monitoring_status()
     logging.info(f"Monitoring status: {monitoring_status}")
     
-    # Validate environment variables
-    required_vars: List[str] = ['DISCORD_TOKEN', 'CRAFTY_URL', 'CRAFTY_TOKEN', 'SERVER_ID', 'GUILD_ID']
-    missing_vars: List[str] = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        logging.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        return
-    
-    # Validate SERVER_ID format
-    server_id = os.getenv('SERVER_ID')
-    try:
-        uuid.UUID(server_id)
-    except ValueError:
-        logging.error("SERVER_ID must be a valid UUID")
+    # Perform comprehensive startup health check (includes all validation)
+    logging.info("Performing comprehensive startup validation...")
+    health_check_success = await perform_startup_health_check()
+    if not health_check_success:
+        logging.error("Comprehensive startup validation failed - bot will not start")
         return
     
     # Initialize and run the bot
@@ -55,9 +47,10 @@ async def main() -> None:
         capture_exception(e, {
             'component': 'main',
             'stage': 'bot_startup',
-            'server_id': server_id if 'server_id' in locals() else None
+            'server_id': os.getenv('SERVER_ID')
         })
     finally:
+        await bot.cleanup()
         await bot.close()
 
 if __name__ == "__main__":

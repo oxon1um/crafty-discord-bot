@@ -6,7 +6,8 @@ import traceback
 import asyncio
 from discord.ext import commands
 from discord import app_commands
-from utils.crafty_api import CraftyAPI, ServerStats, ApiResponse
+from utils.crafty_api import CraftyAPI, ServerStats, ApiResponse, CraftyAPIError
+from utils.token_manager import TokenManager, TokenManagerError
 from utils.monitoring import capture_exception, add_breadcrumb
 from typing import Dict, Any, Optional, List, Tuple, Callable
 
@@ -15,6 +16,33 @@ from typing_extensions import Annotated  # Use typing_extensions for Python 3.8+
 from utils.discord_utils import can_respond, safe_respond_async, safe_followup_async
 
 logger = logging.getLogger(__name__)
+
+def _has_valid_credentials(bot) -> bool:
+    """Check if bot has valid Crafty Controller credentials"""
+    if not bot.crafty_url:
+        return False
+    # Either token OR both username and password
+    return bool(bot.crafty_token) or bool(bot.crafty_username and bot.crafty_password)
+
+def _get_auth_for_api(bot):
+    """Get authentication method for CraftyAPI - either static token or TokenManager instance
+    
+    Returns:
+        Either a token string or TokenManager instance for CraftyAPI
+        
+    Raises:
+        ValueError: If no valid authentication method is available
+    """
+    # If we have a direct token, use it (static token mode)
+    if bot.crafty_token:
+        return bot.crafty_token
+    
+    # If we have TokenManager, use it for dynamic token management
+    if bot.token_manager:
+        return bot.token_manager
+    
+    # Fallback: no valid authentication
+    raise ValueError("No valid authentication method available")
 
 # Constants
 SERVER_ID_FIELD = "Server ID"
@@ -30,7 +58,11 @@ class CraftyBot(commands.Bot):
         super().__init__(*args, **kwargs)
         self.crafty_url: Optional[str] = None
         self.crafty_token: Optional[str] = None
+        self.crafty_username: Optional[str] = None
+        self.crafty_password: Optional[str] = None
         self.server_id: str = self._get_server_id()
+        self.token_manager: Optional[TokenManager] = None
+        self.auth_mode: str = "unknown"
     
     def _get_server_id(self) -> str:
         """Get SERVER_ID from environment"""
@@ -43,6 +75,16 @@ class CraftyBot(commands.Bot):
         except ValueError:
             raise ValueError("SERVER_ID must be a valid UUID")
         return str(uuid_obj)
+    
+    async def cleanup(self) -> None:
+        """Clean up resources, including TokenManager if present"""
+        if self.token_manager:
+            logger.info("Cleaning up TokenManager...")
+            try:
+                await self.token_manager.close()
+                logger.debug("TokenManager cleanup completed")
+            except Exception as e:
+                logger.error(f"Error during TokenManager cleanup: {e}")
 
 def _add_success_fields(embed: discord.Embed, response: ApiResponse, server_id: str):
     embed.add_field(name=SERVER_ID_FIELD, value=str(server_id), inline=True)
@@ -218,6 +260,55 @@ def create_status_embed(bot, server_stats: ServerStats) -> discord.Embed:
     
     return embed
 
+async def perform_startup_auth_check(bot) -> bool:
+    """Perform initial authentication check at startup
+    
+    This function tests the authentication method by making a harmless API call
+    to verify that the bot can successfully authenticate with Crafty Controller.
+    
+    Args:
+        bot: The CraftyBot instance
+        
+    Returns:
+        True if authentication is successful, False otherwise
+    """
+    logger.info(f"Performing startup authentication check using {bot.auth_mode} mode")
+    
+    if not _has_valid_credentials(bot):
+        logger.error("Startup authentication check failed - no valid credentials")
+        return False
+    
+    try:
+        # Get authentication method (token string or TokenManager instance)
+        auth_method = _get_auth_for_api(bot)
+        
+        # Test authentication by making a simple API call (get server stats)
+        async with CraftyAPI(bot.crafty_url, auth_method) as api:
+            try:
+                async with asyncio.timeout(15):  # Slightly longer timeout for startup
+                    response = await api.get_server_stats(bot.server_id)
+                    
+                if response.success:
+                    logger.info("Startup authentication check successful - server stats retrieved")
+                    return True
+                else:
+                    logger.error(f"Startup authentication check failed - API returned error: {response.message}")
+                    return False
+                    
+            except asyncio.TimeoutError:
+                logger.error("Startup authentication check failed - API timeout")
+                return False
+                
+    except TokenManagerError as e:
+        logger.error(f"Startup authentication check failed - TokenManager error: {e}")
+        return False
+    except CraftyAPIError as e:
+        logger.error(f"Startup authentication check failed - API error: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Startup authentication check failed - unexpected error: {e}")
+        return False
+
 async def on_ready_handler(bot):
     logger.info(f'{bot.user} has connected to Discord!')
     logger.info('Bot is ready to manage Crafty Controller servers')
@@ -340,9 +431,12 @@ def get_start_command(bot):
     @app_commands.command(name="start", description="Start the Crafty Controller server")
     async def start_server(interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        if not bot.crafty_url or not bot.crafty_token:
+        if not _has_valid_credentials(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
-        async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
+        
+        # Get authentication method (token string or TokenManager instance)
+        auth_method = _get_auth_for_api(bot)
+        async with CraftyAPI(bot.crafty_url, auth_method) as api:
             try:
                 async with asyncio.timeout(10):
                     response = await api.start_server(bot.server_id)
@@ -357,9 +451,12 @@ def get_stop_command(bot):
     @app_commands.command(name="stop", description="Stop the Crafty Controller server")
     async def stop_server(interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        if not bot.crafty_url or not bot.crafty_token:
+        if not _has_valid_credentials(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
-        async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
+        
+        # Get authentication method (token string or TokenManager instance)
+        auth_method = _get_auth_for_api(bot)
+        async with CraftyAPI(bot.crafty_url, auth_method) as api:
             try:
                 async with asyncio.timeout(10):
                     response = await api.stop_server(bot.server_id)
@@ -374,9 +471,12 @@ def get_restart_command(bot):
     @app_commands.command(name="restart", description="Restart the Crafty Controller server")
     async def restart_server(interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        if not bot.crafty_url or not bot.crafty_token:
+        if not _has_valid_credentials(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
-        async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
+        
+        # Get authentication method (token string or TokenManager instance)
+        auth_method = _get_auth_for_api(bot)
+        async with CraftyAPI(bot.crafty_url, auth_method) as api:
             try:
                 async with asyncio.timeout(10):
                     response = await api.restart_server(bot.server_id)
@@ -391,9 +491,12 @@ def get_kill_command(bot):
     @app_commands.command(name="kill", description="Force kill the Crafty Controller server")
     async def kill_server(interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        if not bot.crafty_url or not bot.crafty_token:
+        if not _has_valid_credentials(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
-        async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
+        
+        # Get authentication method (token string or TokenManager instance)
+        auth_method = _get_auth_for_api(bot)
+        async with CraftyAPI(bot.crafty_url, auth_method) as api:
             try:
                 async with asyncio.timeout(10):
                     response = await api.kill_server(bot.server_id)
@@ -408,9 +511,12 @@ def get_status_command(bot):
     @app_commands.command(name="status", description="Check server status and statistics via the /stats endpoint")
     async def check_status(interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        if not bot.crafty_url or not bot.crafty_token:
+        if not _has_valid_credentials(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
-        async with CraftyAPI(bot.crafty_url, bot.crafty_token) as api:
+        
+        # Get authentication method (token string or TokenManager instance)
+        auth_method = _get_auth_for_api(bot)
+        async with CraftyAPI(bot.crafty_url, auth_method) as api:
             try:
                 async with asyncio.timeout(10):
                     response = await api.get_server_stats(bot.server_id)
@@ -453,10 +559,37 @@ def create_bot() -> CraftyBot:
     intents = discord.Intents.default()
     intents.message_content = True  # Enable message content intent
     bot = CraftyBot(command_prefix=None, intents=intents, help_command=None)
+    
+    # Load Crafty Controller configuration
     bot.crafty_url = os.getenv('CRAFTY_URL')
     bot.crafty_token = os.getenv('CRAFTY_TOKEN')
-    if not bot.crafty_url or not bot.crafty_token:
-        raise ValueError("CRAFTY_URL and CRAFTY_TOKEN environment variables are required")
+    bot.crafty_username = os.getenv('CRAFTY_USERNAME')
+    bot.crafty_password = os.getenv('CRAFTY_PASSWORD')
+    
+    if not bot.crafty_url:
+        raise ValueError("CRAFTY_URL environment variable is required")
+    
+    # Validate credentials - either token or both username and password
+    if not bot.crafty_token and not (bot.crafty_username and bot.crafty_password):
+        raise ValueError(
+            "Invalid Crafty Controller credentials. "
+            "Either CRAFTY_TOKEN must be provided, or both CRAFTY_USERNAME and CRAFTY_PASSWORD must be provided."
+        )
+    
+    # Detect and log authentication mode
+    if bot.crafty_token:
+        logger.info("Authentication mode: Static Token")
+        bot.auth_mode = "static_token"
+    elif bot.crafty_username and bot.crafty_password:
+        logger.info("Authentication mode: Username/Password with TokenManager")
+        bot.auth_mode = "credentials"
+        # Initialize TokenManager for dynamic token management
+        bot.token_manager = TokenManager(bot.crafty_url, bot.crafty_username, bot.crafty_password)
+        logger.info("Initialized TokenManager for persistent token storage")
+    else:
+        # This shouldn't happen due to validation above, but keeping for completeness
+        logger.error("Unknown authentication mode")
+        bot.auth_mode = "unknown"
 
     @bot.event
     async def on_ready():

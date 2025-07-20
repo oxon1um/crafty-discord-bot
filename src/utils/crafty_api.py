@@ -115,26 +115,38 @@ class CraftyAPI:
             stats = await api.get_server_stats(server_id)
     """
     
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token_or_manager: Optional[Union[str, Any]] = None, username: Optional[str] = None, password: Optional[str] = None) -> None:
         """Initialize the Crafty API client
         
         Args:
             base_url: The base URL of the Crafty Controller instance
-            token: The API token for authentication
+            token_or_manager: The API token for authentication or a TokenManager instance
+            username: Username for authentication (optional if using token_or_manager)
+            password: Password for authentication (optional if using token_or_manager)
+        
+        Raises:
+            ValueError: If neither token, TokenManager nor username/password are provided
         """
         self.base_url = base_url.rstrip('/')
-        self.token = token
+        self.token_or_manager = token_or_manager
+        self.username = username
+        self.password = password
         self.session: Optional[aiohttp.ClientSession] = None
+        self.auth_token: Optional[str] = None  # For storing login token
+        
+        # Validate authentication parameters
+        if not token_or_manager and not (username and password):
+            raise ValueError("Either token, TokenManager or both username and password must be provided")
         
     async def __aenter__(self) -> 'CraftyAPI':
         """Async context manager entry"""
         async def on_request_start(session, trace_config_ctx, params):
-            print(f"Starting request to {params.url}")
+            logger.debug(f"Starting request to {params.url}")
             redacted_headers = redact_authorization(params.headers)
-            print(f"Headers: {redacted_headers}")
+            logger.debug(f"Headers: {redacted_headers}")
 
         async def on_request_end(session, trace_config_ctx, params):
-            print(f"Request to {params.url} ended with status {params.response.status}")
+            logger.debug(f"Request to {params.url} ended with status {params.response.status}")
 
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(on_request_start)
@@ -157,6 +169,86 @@ class CraftyAPI:
         if self.session:
             await self.session.close()
     
+    async def _get_auth_token(self) -> str:
+        """Get authentication token from TokenManager or static token
+        
+        Returns:
+            The authentication token
+            
+        Raises:
+            CraftyAPIError: If no token is available
+        """
+        if isinstance(self.token_or_manager, str):
+            # Static token mode
+            auth_token = self.token_or_manager or self.auth_token
+        elif hasattr(self.token_or_manager, 'get_token'):
+            # TokenManager instance - get token dynamically
+            auth_token = await self.token_or_manager.get_token()  # type: ignore
+        else:
+            # Fallback to stored auth_token
+            auth_token = self.auth_token
+        
+        if not auth_token:
+            raise CraftyAPIError("No authentication token available")
+            
+        return auth_token
+    
+    def _build_request_headers(self, auth_token: str) -> Dict[str, str]:
+        """Build headers for API request
+        
+        Args:
+            auth_token: The authentication token
+            
+        Returns:
+            Dictionary of request headers
+        """
+        return {
+            "Authorization": f"Bearer {auth_token}",
+            "Content-Type": "application/json"
+        }
+    
+    async def _execute_request(self, session: aiohttp.ClientSession, method: str, url: str, 
+                             headers: Dict[str, str], **kwargs) -> ApiResponse:
+        """Execute the actual HTTP request
+        
+        Args:
+            session: The aiohttp client session
+            method: HTTP method
+            url: Full request URL
+            headers: Request headers
+            **kwargs: Additional request arguments
+            
+        Returns:
+            ApiResponse object
+            
+        Raises:
+            CraftyAPIResponseError: If API returns non-200 status
+        """
+        start_time = asyncio.get_event_loop().time()
+        
+        async with session.request(method, url, headers=headers, **kwargs) as response:
+            end_time = asyncio.get_event_loop().time()
+            latency = end_time - start_time
+            logger.info(f"Request to {url} took {latency:.2f} seconds.")
+            
+            try:
+                response_data = await response.json()
+            except aiohttp.ContentTypeError:
+                response_data = {}
+            
+            if response.status == 200 and response_data.get('status') == 'ok':
+                return ApiResponse(
+                    success=True,
+                    message="Request successful",
+                    data=response_data.get('data')
+                )
+            else:
+                error_message = response_data.get('error', f"HTTP {response.status}: {response.reason}")
+                raise CraftyAPIResponseError(
+                    f"API request failed: {error_message}",
+                    response.status
+                )
+    
     async def _make_request(self, method: str, endpoint: str, **kwargs) -> ApiResponse:
         """Make authenticated request to Crafty Controller API
         
@@ -177,11 +269,8 @@ class CraftyAPI:
             raise CraftyAPIConnectionError("API session not initialized")
         
         session = self.session  # Type narrowing for mypy/pylance
-        
-        headers = {
-            "Authorization": f"Bearer {self.token}",  # Standard format
-            "Content-Type": "application/json"
-        }
+        auth_token = await self._get_auth_token()
+        headers = self._build_request_headers(auth_token)
         url = f"{self.base_url}/api/v2{endpoint}"
         
         logger.debug(f"Making {method} request to {url}")
@@ -191,33 +280,11 @@ class CraftyAPI:
             logger.debug(f"Connector connections: {session.connector._conns}")
         
         try:
-            start_time = asyncio.get_event_loop().time()
-            # Add an additional timeout layer for better control
-            async def make_request():
-                async with session.request(method, url, headers=headers, **kwargs) as response:
-                    end_time = asyncio.get_event_loop().time()
-                    latency = end_time - start_time
-                    logger.info(f"Request to {url} took {latency:.2f} seconds.")
-                    try:
-                        response_data = await response.json()
-                    except aiohttp.ContentTypeError:
-                        response_data = {}
-                    
-                    if response.status == 200 and response_data.get('status') == 'ok':
-                        return ApiResponse(
-                            success=True,
-                            message="Request successful",
-                            data=response_data.get('data')
-                        )
-                    else:
-                        error_message = response_data.get('error', f"HTTP {response.status}: {response.reason}")
-                        raise CraftyAPIResponseError(
-                            f"API request failed: {error_message}",
-                            response.status
-                        )
-            
             # Use asyncio.wait_for for compatibility with Python 3.10
-            return await asyncio.wait_for(make_request(), timeout=35)
+            return await asyncio.wait_for(
+                self._execute_request(session, method, url, headers, **kwargs), 
+                timeout=35
+            )
                         
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
             logger.error(f"Request timeout: {e}")
