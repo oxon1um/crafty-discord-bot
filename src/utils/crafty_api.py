@@ -299,6 +299,23 @@ class CraftyAPI:
             logger.error(f"Unexpected error: {e}")
             raise CraftyAPIError(f"Unexpected error: {str(e)}")
     
+    async def _fetch_server_name(self, server_id: str) -> Optional[str]:
+        """Fetch server name from server stats
+        
+        Args:
+            server_id: The UUID string of the server
+            
+        Returns:
+            Server name if successfully retrieved, None on failure
+        """
+        try:
+            stats_response = await self.get_server_stats(server_id)
+            if stats_response.success and isinstance(stats_response.data, ServerStats):
+                return stats_response.data.server_name
+        except Exception:
+            pass
+        return None
+    
     async def start_server(self, server_id: str) -> ApiResponse:
         """Start a server
         
@@ -311,9 +328,12 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
+        name = await self._fetch_server_name(server_id)
+        display_name = name or server_id
+        
         try:
             response = await self._make_request("POST", f"/servers/{server_id}/action/start_server")
-            response.message = f"Server {server_id} start command sent successfully"
+            response.message = f"Server {display_name} start command sent successfully"
             return response
         except CraftyAPIError as e:
             return ApiResponse(
@@ -334,9 +354,12 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
+        name = await self._fetch_server_name(server_id)
+        display_name = name or server_id
+        
         try:
             response = await self._make_request("POST", f"/servers/{server_id}/action/stop_server")
-            response.message = f"Server {server_id} stop command sent successfully"
+            response.message = f"Server {display_name} stop command sent successfully"
             return response
         except CraftyAPIError as e:
             return ApiResponse(
@@ -357,9 +380,12 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
+        name = await self._fetch_server_name(server_id)
+        display_name = name or server_id
+        
         try:
             response = await self._make_request("POST", f"/servers/{server_id}/action/restart_server")
-            response.message = f"Server {server_id} restart command sent successfully"
+            response.message = f"Server {display_name} restart command sent successfully"
             return response
         except CraftyAPIError as e:
             return ApiResponse(
@@ -380,9 +406,12 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
+        name = await self._fetch_server_name(server_id)
+        display_name = name or server_id
+        
         try:
             response = await self._make_request("POST", f"/servers/{server_id}/action/kill_server")
-            response.message = f"Server {server_id} force kill command sent successfully"
+            response.message = f"Server {display_name} force kill command sent successfully"
             return response
         except CraftyAPIError as e:
             return ApiResponse(
@@ -574,9 +603,12 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
+        name = await self._fetch_server_name(server_id)
+        display_name = name or server_id
+        
         try:
             response = await self._make_request("POST", f"/servers/{server_id}/action/backup_server")
-            response.message = f"Server {server_id} backup command sent successfully"
+            response.message = f"Server {display_name} backup command sent successfully"
             return response
         except CraftyAPIError as e:
             return ApiResponse(
