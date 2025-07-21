@@ -316,6 +316,33 @@ class CraftyAPI:
             pass
         return None
     
+    async def _perform_action(self, action_endpoint: str, verb: str, server_id: str) -> ApiResponse:
+        """Perform a server action with consistent error handling and messaging
+        
+        Args:
+            action_endpoint: The API endpoint path for the action
+            verb: The verb describing the action (e.g., "start", "stop", "restart")
+            server_id: The UUID string of the server
+            
+        Returns:
+            ApiResponse indicating success or failure
+            
+        Raises:
+            CraftyAPIError: If the request fails
+        """
+        name = await self._fetch_server_name(server_id) or server_id
+        
+        try:
+            resp = await self._make_request("POST", action_endpoint)
+            resp.message = f"Server {name} {verb} command sent successfully"
+            return resp
+        except CraftyAPIError as e:
+            return ApiResponse(
+                success=False,
+                message=f"Failed to {verb} server {server_id}: {str(e)}",
+                error_code=e.status_code
+            )
+    
     async def start_server(self, server_id: str) -> ApiResponse:
         """Start a server
         
@@ -328,19 +355,7 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
-        name = await self._fetch_server_name(server_id)
-        display_name = name or server_id
-        
-        try:
-            response = await self._make_request("POST", f"/servers/{server_id}/action/start_server")
-            response.message = f"Server {display_name} start command sent successfully"
-            return response
-        except CraftyAPIError as e:
-            return ApiResponse(
-                success=False,
-                message=f"Failed to start server {server_id}: {str(e)}",
-                error_code=e.status_code
-            )
+        return await self._perform_action(f"/servers/{server_id}/action/start_server", "start", server_id)
     
     async def stop_server(self, server_id: str) -> ApiResponse:
         """Stop a server
@@ -354,19 +369,7 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
-        name = await self._fetch_server_name(server_id)
-        display_name = name or server_id
-        
-        try:
-            response = await self._make_request("POST", f"/servers/{server_id}/action/stop_server")
-            response.message = f"Server {display_name} stop command sent successfully"
-            return response
-        except CraftyAPIError as e:
-            return ApiResponse(
-                success=False,
-                message=f"Failed to stop server {server_id}: {str(e)}",
-                error_code=e.status_code
-            )
+        return await self._perform_action(f"/servers/{server_id}/action/stop_server", "stop", server_id)
     
     async def restart_server(self, server_id: str) -> ApiResponse:
         """Restart a server
@@ -380,19 +383,7 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
-        name = await self._fetch_server_name(server_id)
-        display_name = name or server_id
-        
-        try:
-            response = await self._make_request("POST", f"/servers/{server_id}/action/restart_server")
-            response.message = f"Server {display_name} restart command sent successfully"
-            return response
-        except CraftyAPIError as e:
-            return ApiResponse(
-                success=False,
-                message=f"Failed to restart server {server_id}: {str(e)}",
-                error_code=e.status_code
-            )
+        return await self._perform_action(f"/servers/{server_id}/action/restart_server", "restart", server_id)
     
     async def kill_server(self, server_id: str) -> ApiResponse:
         """Force kill a server
@@ -406,19 +397,7 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
-        name = await self._fetch_server_name(server_id)
-        display_name = name or server_id
-        
-        try:
-            response = await self._make_request("POST", f"/servers/{server_id}/action/kill_server")
-            response.message = f"Server {display_name} force kill command sent successfully"
-            return response
-        except CraftyAPIError as e:
-            return ApiResponse(
-                success=False,
-                message=f"Failed to kill server {server_id}: {str(e)}",
-                error_code=e.status_code
-            )
+        return await self._perform_action(f"/servers/{server_id}/action/kill_server", "force kill", server_id)
     
     async def get_server_info(self, server_id: str) -> ApiResponse:
         """Get basic server information
@@ -603,18 +582,57 @@ class CraftyAPI:
         Raises:
             CraftyAPIError: If the request fails
         """
-        name = await self._fetch_server_name(server_id)
-        display_name = name or server_id
+        return await self._perform_action(f"/servers/{server_id}/action/backup_server", "backup", server_id)
+    
+    async def get_server_logs(self, server_id: str, lines: int = 50) -> ApiResponse:
+        """Get server logs
         
+        Args:
+            server_id: The UUID string of the server to get logs for
+            lines: Number of log lines to retrieve (default: 50)
+            
+        Returns:
+            ApiResponse containing server logs or error info
+            
+        Raises:
+            CraftyAPIError: If the request fails
+        """
         try:
-            response = await self._make_request("POST", f"/servers/{server_id}/action/backup_server")
-            response.message = f"Server {display_name} backup command sent successfully"
-            return response
-        except CraftyAPIError as e:
+            # Try different possible log endpoints
+            possible_endpoints = [
+                f"/servers/{server_id}/logs?lines={lines}",
+                f"/servers/{server_id}/logs",
+                f"/servers/{server_id}/action/get_logs?lines={lines}",
+                f"/servers/{server_id}/console"
+            ]
+            
+            for endpoint in possible_endpoints:
+                try:
+                    logger.debug(f"Trying logs endpoint: {endpoint}")
+                    response = await self._make_request("GET", endpoint)
+                    if response.success:
+                        logger.debug(f"Successfully retrieved logs from endpoint: {endpoint}")
+                        logger.debug(f"Logs response data type: {type(response.data)}")
+                        logger.debug(f"Logs response data: {response.data}")
+                        response.message = f"Server {server_id} logs retrieved successfully"
+                        return response
+                except CraftyAPIError as endpoint_error:
+                    logger.debug(f"Endpoint {endpoint} failed: {endpoint_error}")
+                    continue
+            
+            # If all endpoints failed
             return ApiResponse(
                 success=False,
-                message=f"Failed to backup server {server_id}: {str(e)}",
-                error_code=e.status_code
+                message=f"Could not retrieve logs for server {server_id} - no working endpoint found",
+                error_code=404
+            )
+            
+        except Exception as e:
+            logger.error(f"Unexpected error getting server logs: {e}")
+            return ApiResponse(
+                success=False,
+                message=f"Failed to get server logs for {server_id}: {str(e)}",
+                error_code=500
             )
 
 

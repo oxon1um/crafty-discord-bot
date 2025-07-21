@@ -4,6 +4,7 @@ import logging
 import uuid
 import traceback
 import asyncio
+import time
 from discord.ext import commands
 from discord import app_commands
 from utils.crafty_api import CraftyAPI, ServerStats, ApiResponse, CraftyAPIError
@@ -48,6 +49,7 @@ def _get_auth_for_api(bot):
 SERVER_ID_FIELD = "Server ID"
 TIMEOUT_MESSAGE = "⚠️ Crafty API timed-out."
 BOT_FOOTER_TEXT = "Crafty Controller Bot"
+START_COMMAND_COOLDOWN = 120  # 2 minutes in seconds
 
 class CraftyBot(commands.Bot):
     """Extended Bot class with Crafty API configuration"""
@@ -63,6 +65,7 @@ class CraftyBot(commands.Bot):
         self.server_id: str = self._get_server_id()
         self.token_manager: Optional[TokenManager] = None
         self.auth_mode: str = "unknown"
+        self.last_start_command: Dict[int, float] = {}  # user_id -> timestamp
     
     def _get_server_id(self) -> str:
         """Get SERVER_ID from environment"""
@@ -260,6 +263,242 @@ def create_status_embed(bot, server_stats: ServerStats) -> discord.Embed:
     
     return embed
 
+def create_startup_logs_embed(bot, server_stats: ServerStats, logs_data: Dict[str, Any], server_id: str) -> discord.Embed:
+    """Create a formatted embed showing server startup with logs
+    
+    Args:
+        bot: The Discord bot instance
+        server_stats: ServerStats object containing server information
+        logs_data: Dictionary containing server logs
+        server_id: The server ID
+        
+    Returns:
+        A formatted Discord embed with server status and logs
+    """
+    # Get basic server state
+    status_emoji, status_text, color = _derive_server_state(server_stats)
+    
+    # Get core server info
+    server_name = _safe_get_attr_multi(server_stats, ['server_name'], 'Unknown Server')
+    
+    # Create embed
+    embed = discord.Embed(
+        title=f"🚀 Server Started: {server_name}",
+        description=f"{status_emoji} Server is now {status_text.lower()}",
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+    
+    # Add basic server info
+    embed.add_field(name="Status", value=f"{status_emoji} {status_text}", inline=True)
+    embed.add_field(name=SERVER_ID_FIELD, value=str(server_id), inline=True)
+    embed.add_field(name="Version", value=_safe_get_attr_multi(server_stats, ['version'], 'Unknown'), inline=True)
+    
+    # Add player count
+    embed.add_field(name="Players Online", value=_format_players(server_stats), inline=True)
+    
+    # Add world info if available
+    world_name = _safe_get_attr_multi(server_stats, ['world_name'], 'Unknown')
+    if world_name and world_name != 'Unknown':
+        embed.add_field(name="World Name", value=world_name, inline=True)
+    
+    # Add server start time
+    started = _safe_get_attr_multi(server_stats, ['started'])
+    if started and started != "Unknown":
+        embed.add_field(name="Started", value=started, inline=True)
+    
+    # Format and add logs
+    if logs_data:
+        # Extract log lines from the response
+        log_lines: List[Any] = []
+        if isinstance(logs_data, dict):
+            # Handle different possible log data structures
+            if 'logs' in logs_data and isinstance(logs_data['logs'], list):
+                log_lines = logs_data['logs']
+            elif 'data' in logs_data and isinstance(logs_data['data'], list):
+                log_lines = logs_data['data']
+        elif isinstance(logs_data, list):
+            log_lines = logs_data
+        
+        if log_lines and isinstance(log_lines, list):
+            # Take the last 10 lines and format them
+            recent_logs = log_lines[-10:] if len(log_lines) > 10 else log_lines
+            log_text = "\n".join(str(line) for line in recent_logs)
+            
+            # Truncate if too long for Discord (field value limit is 1024)
+            if len(log_text) > 1000:
+                log_text = log_text[-1000:]
+                log_text = "..." + log_text[log_text.find("\n") + 1:]
+            
+            embed.add_field(
+                name="📄 Recent Server Logs",
+                value=f"```\n{log_text}\n```",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="📄 Server Logs",
+                value="No recent logs available",
+                inline=False
+            )
+    
+    # Set footer
+    embed.set_footer(
+        text=BOT_FOOTER_TEXT, 
+        icon_url=bot.user.avatar.url if bot.user and bot.user.avatar else None
+    )
+    
+    return embed
+
+class LogScrollView(discord.ui.View):
+    """A view for scrolling through server logs"""
+    
+    def __init__(self, bot, server_stats: ServerStats, server_id: str, base_url: str, token_or_manager):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.bot = bot
+        self.server_stats = server_stats
+        self.server_id = server_id
+        self.base_url = base_url
+        self.token_or_manager = token_or_manager
+        self.current_offset = 0
+        self.logs_per_page = 10
+        
+    async def get_logs_embed(self, lines: int = 10) -> discord.Embed:
+        """Get logs embed with specified number of lines"""
+        try:
+            # Create a new API instance for each request to avoid session issues
+            async with CraftyAPI(self.base_url, self.token_or_manager) as api:
+                logs_response = await api.get_server_logs(
+                    self.server_id, 
+                    lines=lines
+                )
+                
+                if logs_response.success and logs_response.data:
+                    logs_data = logs_response.data if isinstance(logs_response.data, dict) else {'logs': logs_response.data if isinstance(logs_response.data, list) else [str(logs_response.data)]}
+                    return create_startup_logs_embed(self.bot, self.server_stats, logs_data, self.server_id)
+                else:
+                    # Fallback to status embed if logs fail
+                    return create_status_embed(self.bot, self.server_stats)
+        except Exception as e:
+            logger.error(f"Error getting logs for scroll view: {e}")
+            return create_status_embed(self.bot, self.server_stats)
+    
+    @discord.ui.button(label='📄 More Logs', style=discord.ButtonStyle.secondary)
+    async def more_logs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show more logs (increase line count)"""
+        self.logs_per_page = min(50, self.logs_per_page + 10)  # Cap at 50 lines
+        embed = await self.get_logs_embed(self.logs_per_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label='🔄 Refresh', style=discord.ButtonStyle.primary)
+    async def refresh_logs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Refresh current logs"""
+        embed = await self.get_logs_embed(self.logs_per_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label='📄 Less Logs', style=discord.ButtonStyle.secondary)
+    async def less_logs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show fewer logs (decrease line count)"""
+        self.logs_per_page = max(5, self.logs_per_page - 10)  # Minimum 5 lines
+        embed = await self.get_logs_embed(self.logs_per_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def on_timeout(self):
+        """Disable buttons when view times out"""
+        for item in self.children:
+            item.disabled = True
+        # Note: We can't edit the message here since we don't have the message reference
+
+def check_start_command_cooldown(bot, user_id: int) -> Tuple[bool, Optional[float]]:
+    """Check if user is on cooldown for start command
+    
+    Returns:
+        Tuple of (is_on_cooldown, time_remaining)
+    """
+    current_time = time.time()
+    last_command_time = bot.last_start_command.get(user_id, 0)
+    time_since_last = current_time - last_command_time
+    
+    if time_since_last < START_COMMAND_COOLDOWN:
+        time_remaining = START_COMMAND_COOLDOWN - time_since_last
+        return True, time_remaining
+    
+    return False, None
+
+def update_start_command_timestamp(bot, user_id: int):
+    """Update the timestamp for when user last used start command"""
+    bot.last_start_command[user_id] = time.time()
+
+async def wait_for_logs_availability(api: CraftyAPI, server_id: str, max_wait: int = 30, check_interval: int = 2) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Wait for server logs to become available
+    
+    Args:
+        api: CraftyAPI instance
+        server_id: Server ID
+        max_wait: Maximum time to wait in seconds
+        check_interval: How often to check in seconds
+        
+    Returns:
+        Tuple of (logs_available, logs_data)
+    """
+    waited = 0
+    while waited < max_wait:
+        try:
+            logs_response = await api.get_server_logs(server_id, lines=10)
+            logger.debug(f"Logs response: success={logs_response.success}, data_type={type(logs_response.data)}, data={logs_response.data}")
+            
+            if logs_response.success:
+                # Check if logs contain meaningful data
+                logs_data = logs_response.data
+                
+                # Be more flexible about log data structures
+                log_lines = []
+                if isinstance(logs_data, dict):
+                    # Try multiple possible keys
+                    for key in ['logs', 'data', 'content', 'lines', 'log_lines']:
+                        if key in logs_data and isinstance(logs_data[key], list):
+                            log_lines = logs_data[key]
+                            logger.debug(f"Found logs under key '{key}': {len(log_lines)} lines")
+                            break
+                    # If no list found in dict, check if any values are strings (could be raw log content)
+                    if not log_lines:
+                        for key, value in logs_data.items():
+                            if isinstance(value, str) and value.strip():
+                                # Split string content into lines
+                                log_lines = value.strip().split('\n')
+                                logger.debug(f"Found string logs under key '{key}': {len(log_lines)} lines")
+                                break
+                elif isinstance(logs_data, list):
+                    log_lines = logs_data
+                    logger.debug(f"Logs data is directly a list: {len(log_lines)} lines")
+                elif isinstance(logs_data, str) and logs_data.strip():
+                    # Raw string response
+                    log_lines = logs_data.strip().split('\n')
+                    logger.debug(f"Logs data is string: {len(log_lines)} lines")
+                
+                # Check if we have any meaningful log content
+                if log_lines and len(log_lines) > 0:
+                    # Filter out empty lines
+                    meaningful_lines = [line for line in log_lines if str(line).strip()]
+                    if meaningful_lines:
+                        logger.debug(f"Logs became available after {waited} seconds with {len(meaningful_lines)} meaningful lines")
+                        # Return the processed data in a consistent format
+                        return True, {'logs': log_lines}
+            else:
+                logger.debug(f"Logs API call failed: {logs_response.message}")
+            
+            await asyncio.sleep(check_interval)
+            waited += check_interval
+            logger.debug(f"Waiting for logs... {waited}/{max_wait} seconds")
+            
+        except Exception as e:
+            logger.error(f"Error while waiting for logs: {e}")
+            await asyncio.sleep(check_interval)
+            waited += check_interval
+    
+    logger.debug(f"Logs did not become available after {max_wait} seconds")
+    return False, None
+
 async def perform_startup_auth_check(bot) -> bool:
     """Perform initial authentication check at startup
     
@@ -434,6 +673,17 @@ def get_start_command(bot):
         if not _has_valid_credentials(bot):
             raise ValueError(bot.MISSING_CONFIG_ERROR)
         
+        # Check cooldown
+        user_id = interaction.user.id
+        is_on_cooldown, time_remaining = check_start_command_cooldown(bot, user_id)
+        
+        if is_on_cooldown:
+            minutes = int(time_remaining // 60)
+            seconds = int(time_remaining % 60)
+            cooldown_message = f"⏰ Start command was recently used. Please wait {minutes}m {seconds}s before using it again."
+            await safe_followup_async(interaction, cooldown_message, ephemeral=True)
+            return
+        
         # Get authentication method (token string or TokenManager instance)
         auth_method = _get_auth_for_api(bot)
         async with CraftyAPI(bot.crafty_url, auth_method) as api:
@@ -443,8 +693,77 @@ def get_start_command(bot):
             except asyncio.TimeoutError:
                 await safe_followup_async(interaction, TIMEOUT_MESSAGE, ephemeral=True)
                 return
-            embed = create_response_embed(bot, response, "Server Start", bot.server_id)
-            await interaction.followup.send(embed=embed)
+            
+            # Update cooldown timestamp on successful API call
+            update_start_command_timestamp(bot, user_id)
+            
+            # Send initial confirmation embed
+            initial_embed = create_response_embed(bot, response, "Server Start", bot.server_id)
+            message = await interaction.followup.send(embed=initial_embed)
+            
+            # If start was successful, wait for logs and show them with scrollable interface
+            if response.success:
+                logger.debug("Server start command successful, waiting for server to boot...")
+                
+                # Wait a bit for the server to start up
+                await asyncio.sleep(5)
+                
+                try:
+                    async with asyncio.timeout(60):  # Longer timeout for full startup process
+                        # Check server status first
+                        logger.debug("Checking server status after start command...")
+                        stats_response = await api.get_server_stats(bot.server_id)
+                        
+                        if stats_response.success and isinstance(stats_response.data, ServerStats):
+                            server_stats = stats_response.data
+                            logger.debug(f"Server running status: {server_stats.running}")
+                            
+                            if server_stats.running:
+                                # Server is running, immediately try to get logs
+                                logger.debug("Server is running, attempting to get logs immediately...")
+                                logs_response = await api.get_server_logs(bot.server_id, lines=10)
+                                logger.debug(f"Initial logs attempt: success={logs_response.success}, data={logs_response.data}")
+                                
+                                if logs_response.success and logs_response.data:
+                                    # We got logs! Create logs embed and scrollable view
+                                    logs_data = logs_response.data if isinstance(logs_response.data, dict) else {'logs': logs_response.data if isinstance(logs_response.data, list) else [str(logs_response.data)]}
+                                    updated_embed = create_startup_logs_embed(bot, server_stats, logs_data, bot.server_id)
+                                    
+                                    # Add scrollable view for logs
+                                    view = LogScrollView(bot, server_stats, bot.server_id, bot.crafty_url, auth_method)
+                                    await message.edit(embed=updated_embed, view=view)
+                                    return
+                                else:
+                                    # First attempt failed, wait a bit and try waiting for logs
+                                    logger.debug("Initial logs attempt failed, waiting for logs to become available...")
+                                    logs_available, logs_data = await wait_for_logs_availability(api, bot.server_id, max_wait=20)
+                                    
+                                    if logs_available and logs_data:
+                                        # Create scrollable logs view
+                                        logger.debug("Logs became available after waiting, creating scrollable logs interface...")
+                                        updated_embed = create_startup_logs_embed(bot, server_stats, logs_data, bot.server_id)
+                                        
+                                        # Add scrollable view for logs
+                                        view = LogScrollView(bot, server_stats, bot.server_id, bot.crafty_url, auth_method)
+                                        await message.edit(embed=updated_embed, view=view)
+                                        return
+                            else:
+                                logger.debug("Server not running yet, showing status embed")
+                        
+                        # Fallback: show server status if logs failed or server not running
+                        if stats_response.success and isinstance(stats_response.data, ServerStats):
+                            logger.debug("Showing status embed as fallback")
+                            status_embed = create_status_embed(bot, stats_response.data)
+                            await message.edit(embed=status_embed)
+                        
+                except asyncio.TimeoutError:
+                    logger.debug("Timeout waiting for server startup, keeping original message")
+                    # If we timeout, keep the original message
+                    pass
+                except Exception as e:
+                    logger.error(f"Error during enhanced startup process: {e}")
+                    # If anything else fails, keep the original message
+                    pass
     return start_server
 
 def get_stop_command(bot):
